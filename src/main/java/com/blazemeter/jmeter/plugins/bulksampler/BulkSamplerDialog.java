@@ -42,6 +42,15 @@ public class BulkSamplerDialog extends JDialog {
             this.displayName = displayName;
         }
 
+        /**
+         * Returns the display name of this action type.
+         *
+         * @return The display name
+         */
+        public String getDisplayName() {
+            return displayName;
+        }
+
         @Override
         public String toString() {
             return displayName;
