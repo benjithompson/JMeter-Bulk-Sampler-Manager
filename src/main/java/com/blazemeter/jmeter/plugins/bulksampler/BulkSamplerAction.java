@@ -132,7 +132,7 @@ public class BulkSamplerAction extends AbstractAction {
             String actionName = actionType.getDisplayName().toLowerCase();
             JOptionPane.showMessageDialog(
                 guiPackage.getMainFrame(),
-                String.format("Successfully %s %d sampler(s) matching pattern: %s", 
+                "Successfully %s %d sampler(s) matching pattern: %s".formatted(
                     actionName, affectedCount, uriPattern),
                 "Bulk Sampler Manager",
                 JOptionPane.INFORMATION_MESSAGE
@@ -257,8 +257,7 @@ public class BulkSamplerAction extends AbstractAction {
      * @return The extracted URI or element name
      */
     private String extractUri(TestElement element) {
-        if (element instanceof HTTPSamplerBase) {
-            HTTPSamplerBase httpSampler = (HTTPSamplerBase) element;
+        if (element instanceof HTTPSamplerBase httpSampler) {
             String path = httpSampler.getPath();
             String domain = httpSampler.getDomain();
             
