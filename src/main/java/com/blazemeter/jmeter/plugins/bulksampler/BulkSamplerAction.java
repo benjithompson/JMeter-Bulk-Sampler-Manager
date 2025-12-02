@@ -17,23 +17,32 @@
 
 package com.blazemeter.jmeter.plugins.bulksampler;
 
+import java.awt.event.ActionEvent;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+
+import javax.swing.JMenu;
+import javax.swing.JMenuItem;
+import javax.swing.JOptionPane;
+import javax.swing.MenuElement;
+import javax.swing.tree.TreeNode;
+
 import org.apache.jmeter.gui.GuiPackage;
-import org.apache.jmeter.gui.action.AbstractAction;
-import org.apache.jmeter.gui.action.ActionNames;
+import org.apache.jmeter.gui.action.ActionRouter;
+import org.apache.jmeter.gui.action.Command;
+import org.apache.jmeter.gui.plugin.MenuCreator;
 import org.apache.jmeter.gui.tree.JMeterTreeNode;
 import org.apache.jmeter.protocol.http.sampler.HTTPSamplerBase;
-import org.apache.jmeter.protocol.http.sampler.HTTPSamplerProxy;
 import org.apache.jmeter.samplers.Sampler;
 import org.apache.jmeter.testelement.TestElement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.swing.*;
-import javax.swing.tree.TreeNode;
-import java.awt.event.ActionEvent;
-import java.util.*;
-import java.util.regex.Pattern;
-import java.util.regex.PatternSyntaxException;
 
 /**
  * JMeter plugin action for bulk delete or disable of samplers based on URI patterns.
@@ -47,8 +56,11 @@ import java.util.regex.PatternSyntaxException;
  * </ul>
  * 
  * <p>Patterns can be simple text matches or regular expressions.
+ * 
+ * <p>This class implements both Command and MenuCreator interfaces.
+ * It is discovered via the ServiceLoader mechanism.
  */
-public class BulkSamplerAction extends AbstractAction {
+public class BulkSamplerAction implements Command, MenuCreator {
 
     private static final Logger log = LoggerFactory.getLogger(BulkSamplerAction.class);
 
@@ -67,7 +79,10 @@ public class BulkSamplerAction extends AbstractAction {
      */
     public BulkSamplerAction() {
         super();
+        log.info("BulkSamplerAction initialized");
     }
+
+    // ==================== Command Interface ====================
 
     /**
      * Returns the set of action commands this action responds to.
@@ -87,7 +102,7 @@ public class BulkSamplerAction extends AbstractAction {
      */
     @Override
     public void doAction(ActionEvent e) {
-        log.debug("BulkSamplerAction triggered");
+        log.info("BulkSamplerAction.doAction triggered");
 
         GuiPackage guiPackage = GuiPackage.getInstance();
         if (guiPackage == null) {
@@ -109,6 +124,7 @@ public class BulkSamplerAction extends AbstractAction {
         BulkSamplerDialog.ActionType actionType = dialog.getSelectedAction();
         boolean useRegex = dialog.isUseRegex();
         boolean caseSensitive = dialog.isCaseSensitive();
+        boolean invertMatch = dialog.isInvertMatch();
 
         if (uriPattern == null || uriPattern.trim().isEmpty()) {
             JOptionPane.showMessageDialog(
@@ -122,10 +138,10 @@ public class BulkSamplerAction extends AbstractAction {
 
         // Perform the action
         try {
-            int affectedCount = processTestPlan(guiPackage, uriPattern, actionType, useRegex, caseSensitive);
+            int affectedCount = processTestPlan(guiPackage, uriPattern, actionType, useRegex, caseSensitive, invertMatch);
             
-            // Refresh the tree to show changes
-            guiPackage.getTreeModel().reload();
+            // Refresh the GUI without collapsing the tree
+            guiPackage.getMainFrame().repaint();
             guiPackage.refreshCurrentGui();
 
             // Show result message
@@ -160,6 +176,60 @@ public class BulkSamplerAction extends AbstractAction {
         }
     }
 
+    // ==================== MenuCreator Interface ====================
+
+    /**
+     * Returns the menu items to add at the specified location.
+     * Adds "Bulk Sampler Manager..." to the Tools menu.
+     * 
+     * @param location The menu location
+     * @return Array of menu items for that location
+     */
+    @Override
+    public JMenuItem[] getMenuItemsAtLocation(MENU_LOCATION location) {
+        log.info("getMenuItemsAtLocation called with location: {}", location);
+        if (location == MENU_LOCATION.TOOLS) {
+            JMenuItem menuItem = new JMenuItem("Bulk Sampler Manager...");
+            menuItem.setActionCommand(BULK_SAMPLER_MANAGER);
+            menuItem.setMnemonic('B');
+            menuItem.addActionListener(ActionRouter.getInstance());
+            log.info("Created Bulk Sampler Manager menu item for Tools menu");
+            return new JMenuItem[] { menuItem };
+        }
+        return new JMenuItem[0];
+    }
+
+    /**
+     * Returns top-level menus to add.
+     * 
+     * @return Array of top-level menus (empty for this plugin)
+     */
+    @Override
+    public JMenu[] getTopLevelMenus() {
+        return new JMenu[0];
+    }
+
+    /**
+     * Called when locale changes for a specific menu element.
+     * 
+     * @param menu The menu element
+     * @return false - this plugin doesn't handle locale changes
+     */
+    @Override
+    public boolean localeChanged(MenuElement menu) {
+        return false;
+    }
+
+    /**
+     * Called when locale changes globally.
+     */
+    @Override
+    public void localeChanged() {
+        // Nothing to do - menu text is static
+    }
+
+    // ==================== Private Helper Methods ====================
+
     /**
      * Processes the test plan to find and modify samplers matching the pattern.
      * 
@@ -172,7 +242,8 @@ public class BulkSamplerAction extends AbstractAction {
      * @throws PatternSyntaxException if the regex pattern is invalid
      */
     private int processTestPlan(GuiPackage guiPackage, String uriPattern, 
-            BulkSamplerDialog.ActionType actionType, boolean useRegex, boolean caseSensitive) {
+            BulkSamplerDialog.ActionType actionType, boolean useRegex, boolean caseSensitive,
+            boolean invertMatch) {
         
         JMeterTreeNode rootNode = (JMeterTreeNode) guiPackage.getTreeModel().getRoot();
         List<JMeterTreeNode> matchingSamplers = new ArrayList<>();
@@ -185,7 +256,7 @@ public class BulkSamplerAction extends AbstractAction {
         }
 
         // Find all matching samplers
-        findMatchingSamplers(rootNode, uriPattern, pattern, caseSensitive, matchingSamplers);
+        findMatchingSamplers(rootNode, uriPattern, pattern, caseSensitive, invertMatch, matchingSamplers);
 
         log.debug("Found {} samplers matching pattern '{}'", matchingSamplers.size(), uriPattern);
 
@@ -225,19 +296,28 @@ public class BulkSamplerAction extends AbstractAction {
      * @param uriPattern The pattern string (for simple matching)
      * @param pattern The compiled regex pattern (null for simple matching)
      * @param caseSensitive Whether matching should be case-sensitive
+     * @param invertMatch Whether to invert the match (select non-matching samplers)
      * @param matchingSamplers List to add matching sampler nodes to
      */
     private void findMatchingSamplers(JMeterTreeNode node, String uriPattern, 
-            Pattern pattern, boolean caseSensitive, List<JMeterTreeNode> matchingSamplers) {
+            Pattern pattern, boolean caseSensitive, boolean invertMatch,
+            List<JMeterTreeNode> matchingSamplers) {
         
         TestElement element = node.getTestElement();
         
         // Check if this is a sampler
         if (element instanceof Sampler) {
             String uri = extractUri(element);
-            if (uri != null && matchesPattern(uri, uriPattern, pattern, caseSensitive)) {
-                matchingSamplers.add(node);
-                log.debug("Found matching sampler: {} with URI: {}", element.getName(), uri);
+            if (uri != null) {
+                boolean matches = matchesPattern(uri, uriPattern, pattern, caseSensitive);
+                // Invert the match result if invertMatch is enabled
+                if (invertMatch) {
+                    matches = !matches;
+                }
+                if (matches) {
+                    matchingSamplers.add(node);
+                    log.debug("Found matching sampler: {} with URI: {}", element.getName(), uri);
+                }
             }
         }
 
@@ -245,23 +325,32 @@ public class BulkSamplerAction extends AbstractAction {
         Enumeration<TreeNode> children = node.children();
         while (children.hasMoreElements()) {
             JMeterTreeNode child = (JMeterTreeNode) children.nextElement();
-            findMatchingSamplers(child, uriPattern, pattern, caseSensitive, matchingSamplers);
+            findMatchingSamplers(child, uriPattern, pattern, caseSensitive, invertMatch, matchingSamplers);
         }
     }
 
     /**
      * Extracts the URI from a test element (sampler).
-     * Supports HTTP samplers and falls back to element name for other types.
+     * For HTTP samplers, builds full URL from protocol/domain/port/path.
+     * Also includes the sampler name in the searchable text.
      * 
      * @param element The test element to extract URI from
      * @return The extracted URI or element name
      */
     private String extractUri(TestElement element) {
+        StringBuilder searchableText = new StringBuilder();
+        
+        // Always include the element name (it might contain the URL)
+        String name = element.getName();
+        if (name != null) {
+            searchableText.append(name);
+        }
+        
         if (element instanceof HTTPSamplerBase httpSampler) {
             String path = httpSampler.getPath();
             String domain = httpSampler.getDomain();
             
-            // Build full URI if domain is available
+            // Build full URI if we have domain info
             if (domain != null && !domain.isEmpty()) {
                 String protocol = httpSampler.getProtocol();
                 if (protocol == null || protocol.isEmpty()) {
@@ -279,15 +368,18 @@ public class BulkSamplerAction extends AbstractAction {
                     }
                     uri.append(path);
                 }
-                return uri.toString();
+                // Append constructed URI if different from name
+                String constructedUri = uri.toString();
+                if (!constructedUri.equals(name)) {
+                    searchableText.append(" ").append(constructedUri);
+                }
+            } else if (path != null && !path.isEmpty() && !path.equals(name)) {
+                // Just append path if no domain but path exists
+                searchableText.append(" ").append(path);
             }
-            
-            // Return just the path if no domain
-            return path != null ? path : element.getName();
         }
         
-        // For non-HTTP samplers, use the element name
-        return element.getName();
+        return searchableText.toString();
     }
 
     /**
