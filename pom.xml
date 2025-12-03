@@ -5,12 +5,12 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.blazemeter.jmeter.plugins</groupId>
-    <artifactId>bulk-sampler-manager</artifactId>
-    <version>1.1.0</version>
+    <artifactId>bulk-edit-manager</artifactId>
+    <version>1.4.0</version>
     <packaging>jar</packaging>
 
-    <name>JMeter Bulk Sampler Manager Plugin</name>
-    <description>A JMeter plugin to bulk delete or disable samplers based on URI patterns</description>
+    <name>JMeter Bulk Edit Manager Plugin</name>
+    <description>A JMeter plugin for bulk operations on samplers and HTTP headers based on patterns</description>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>

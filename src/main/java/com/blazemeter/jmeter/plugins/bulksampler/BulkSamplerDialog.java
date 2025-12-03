@@ -28,10 +28,12 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.event.KeyEvent;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
+import java.util.stream.Collectors;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -46,6 +48,7 @@ import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JTabbedPane;
 import javax.swing.JTextField;
 import javax.swing.KeyStroke;
 import javax.swing.Timer;
@@ -56,14 +59,17 @@ import javax.swing.tree.TreeNode;
 
 import org.apache.jmeter.gui.GuiPackage;
 import org.apache.jmeter.gui.tree.JMeterTreeNode;
+import org.apache.jmeter.protocol.http.control.Header;
+import org.apache.jmeter.protocol.http.control.HeaderManager;
 import org.apache.jmeter.protocol.http.sampler.HTTPSamplerBase;
 import org.apache.jmeter.samplers.Sampler;
 import org.apache.jmeter.testelement.TestElement;
+import org.apache.jmeter.testelement.property.JMeterProperty;
+import org.apache.jmeter.testelement.property.CollectionProperty;
 
 /**
- * Dialog for configuring bulk sampler operations.
- * Allows users to specify URI patterns and select actions (delete, disable, enable).
- * Includes a live preview of matching samplers.
+ * Dialog for configuring bulk sampler and header operations.
+ * Uses a tabbed interface for different operation types.
  */
 public class BulkSamplerDialog extends JDialog {
 
@@ -83,20 +89,10 @@ public class BulkSamplerDialog extends JDialog {
             this.description = description;
         }
 
-        /**
-         * Returns the display name of this action type.
-         *
-         * @return The display name
-         */
         public String getDisplayName() {
             return displayName;
         }
 
-        /**
-         * Returns the description of this action type.
-         *
-         * @return The description
-         */
         public String getDescription() {
             return description;
         }
@@ -107,6 +103,15 @@ public class BulkSamplerDialog extends JDialog {
         }
     }
 
+    /**
+     * Enum representing which tab/operation mode is active.
+     */
+    public enum OperationMode {
+        SAMPLERS,
+        HTTP_HEADERS
+    }
+
+    // Sampler tab components
     private JTextField uriPatternField;
     private JComboBox<ActionType> actionComboBox;
     private JCheckBox useRegexCheckBox;
@@ -118,22 +123,44 @@ public class BulkSamplerDialog extends JDialog {
     private JLabel patternErrorLabel;
     private JLabel patternExampleLabel;
     private JLabel actionDescriptionLabel;
+
+    // HTTP Headers tab components
+    private JTextField headerPatternField;
+    private JCheckBox headerUseRegexCheckBox;
+    private JCheckBox headerCaseSensitiveCheckBox;
+    private JCheckBox headerInvertMatchCheckBox;
+    private JList<String> headerPreviewList;
+    private DefaultListModel<String> headerPreviewListModel;
+    private JLabel headerMatchCountLabel;
+    private JLabel headerPatternErrorLabel;
+    private JLabel headerPatternExampleLabel;
+
+    private JTabbedPane tabbedPane;
     private boolean confirmed = false;
     private Timer updateTimer;
+    private Timer headerUpdateTimer;
+    
+    // Scope - the selected nodes to limit operations to (empty = entire test plan)
+    private List<JMeterTreeNode> scopeNodes;
+    private JLabel scopeLabel;
 
     private static final String EXAMPLE_SIMPLE = "Example: api/users or login (matches if URI contains text)";
     private static final String EXAMPLE_REGEX = "Example: .*\\/api\\/.*  or  ^https://.*\\.com  (regex pattern)";
+    private static final String HEADER_EXAMPLE_SIMPLE = "Example: Authorization or Content-Type (matches header name)";
+    private static final String HEADER_EXAMPLE_REGEX = "Example: X-.*  or  ^Accept.*  (regex pattern for header name)";
 
     /**
      * Creates a new BulkSamplerDialog.
      *
      * @param parent The parent frame
+     * @param selectedNodes The currently selected nodes (null or empty for entire test plan)
      */
-    public BulkSamplerDialog(Frame parent) {
-        super(parent, "Bulk Sampler Manager", true);
+    public BulkSamplerDialog(Frame parent, List<JMeterTreeNode> selectedNodes) {
+        super(parent, "Bulk Edit Manager", true);
+        this.scopeNodes = selectedNodes != null ? new ArrayList<>(selectedNodes) : new ArrayList<>();
         initComponents();
         pack();
-        setMinimumSize(new Dimension(600, 500));
+        setMinimumSize(new Dimension(650, 580));
         setLocationRelativeTo(parent);
         setupEscapeKey();
     }
@@ -158,14 +185,101 @@ public class BulkSamplerDialog extends JDialog {
     private void initComponents() {
         setLayout(new BorderLayout(10, 10));
 
-        // Main panel with form fields
+        // Scope info panel at top
+        JPanel scopePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 5));
+        scopePanel.setBorder(BorderFactory.createEmptyBorder(5, 10, 0, 10));
+        JLabel scopeTitleLabel = new JLabel("Scope:");
+        scopeTitleLabel.setFont(scopeTitleLabel.getFont().deriveFont(Font.BOLD));
+        scopePanel.add(scopeTitleLabel);
+        
+        String scopeText;
+        if (scopeNodes == null || scopeNodes.isEmpty()) {
+            scopeText = "Entire Test Plan";
+        } else if (scopeNodes.size() == 1) {
+            JMeterTreeNode node = scopeNodes.get(0);
+            if (node.getTestElement().getClass().getSimpleName().equals("TestPlan")) {
+                scopeText = "Entire Test Plan";
+            } else {
+                scopeText = node.getName() + " (and children)";
+            }
+        } else {
+            // Multiple nodes selected
+            String nodeNames = scopeNodes.stream()
+                .map(JMeterTreeNode::getName)
+                .collect(Collectors.joining(", "));
+            if (nodeNames.length() > 60) {
+                nodeNames = nodeNames.substring(0, 57) + "...";
+            }
+            scopeText = scopeNodes.size() + " selected: " + nodeNames;
+        }
+        scopeLabel = new JLabel(scopeText);
+        scopeLabel.setForeground(new Color(0, 100, 0)); // Dark green
+        scopePanel.add(scopeLabel);
+        
+        add(scopePanel, BorderLayout.NORTH);
+
+        // Create tabbed pane
+        tabbedPane = new JTabbedPane();
+        tabbedPane.addTab("Samplers", createSamplersTab());
+        tabbedPane.addTab("HTTP Headers", createHeadersTab());
+        
         JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
         mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        mainPanel.add(tabbedPane, BorderLayout.CENTER);
+        
+        add(mainPanel, BorderLayout.CENTER);
+
+        // Button panel
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+        JButton previewButton = new JButton("Refresh Preview");
+        JButton okButton = new JButton("Apply");
+        JButton cancelButton = new JButton("Cancel");
+
+        previewButton.addActionListener(e -> {
+            if (tabbedPane.getSelectedIndex() == 0) {
+                updateSamplerPreview();
+            } else {
+                updateHeaderPreview();
+            }
+        });
+
+        okButton.addActionListener(e -> {
+            if (validateInput()) {
+                confirmed = true;
+                dispose();
+            }
+        });
+
+        cancelButton.addActionListener(e -> {
+            confirmed = false;
+            dispose();
+        });
+
+        buttonPanel.add(previewButton);
+        buttonPanel.add(Box.createHorizontalStrut(20));
+        buttonPanel.add(okButton);
+        buttonPanel.add(cancelButton);
+        add(buttonPanel, BorderLayout.SOUTH);
+
+        // Set default button
+        getRootPane().setDefaultButton(okButton);
+
+        // Setup listeners
+        setupSamplerListeners();
+        setupHeaderListeners();
+    }
+
+    /**
+     * Creates the Samplers tab panel.
+     */
+    private JPanel createSamplersTab() {
+        JPanel panel = new JPanel(new BorderLayout(10, 10));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
         // Configuration panel
         JPanel configPanel = new JPanel(new GridBagLayout());
         configPanel.setBorder(BorderFactory.createTitledBorder(
-            BorderFactory.createEtchedBorder(), "Configuration",
+            BorderFactory.createEtchedBorder(), "Sampler Configuration",
             TitledBorder.LEFT, TitledBorder.TOP));
         
         GridBagConstraints gbc = new GridBagConstraints();
@@ -183,7 +297,7 @@ public class BulkSamplerDialog extends JDialog {
         gbc.weightx = 1.0;
         gbc.gridwidth = 2;
         uriPatternField = new JTextField(30);
-        uriPatternField.setToolTipText("Enter a pattern to match sampler URIs (e.g., '/api/users' or '.*\\.json')");
+        uriPatternField.setToolTipText("Enter a pattern to match sampler URIs");
         configPanel.add(uriPatternField, gbc);
 
         // Pattern example label
@@ -230,9 +344,7 @@ public class BulkSamplerDialog extends JDialog {
         gbc.gridwidth = 3;
         JPanel optionsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         useRegexCheckBox = new JCheckBox("Use Regular Expression");
-        useRegexCheckBox.setToolTipText("Treat the pattern as a Java regular expression");
         caseSensitiveCheckBox = new JCheckBox("Case Sensitive");
-        caseSensitiveCheckBox.setToolTipText("Match patterns with case sensitivity");
         invertMatchCheckBox = new JCheckBox("Invert Match");
         invertMatchCheckBox.setToolTipText("Apply action to samplers that do NOT match the pattern");
         optionsPanel.add(useRegexCheckBox);
@@ -240,7 +352,7 @@ public class BulkSamplerDialog extends JDialog {
         optionsPanel.add(invertMatchCheckBox);
         configPanel.add(optionsPanel, gbc);
 
-        mainPanel.add(configPanel, BorderLayout.NORTH);
+        panel.add(configPanel, BorderLayout.NORTH);
 
         // Preview panel
         JPanel previewPanel = new JPanel(new BorderLayout(5, 5));
@@ -251,80 +363,138 @@ public class BulkSamplerDialog extends JDialog {
         previewListModel = new DefaultListModel<>();
         previewList = new JList<>(previewListModel);
         previewList.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        previewList.setVisibleRowCount(10);
+        previewList.setVisibleRowCount(8);
         JScrollPane scrollPane = new JScrollPane(previewList);
-        scrollPane.setPreferredSize(new Dimension(550, 200));
+        scrollPane.setPreferredSize(new Dimension(550, 180));
         previewPanel.add(scrollPane, BorderLayout.CENTER);
 
         matchCountLabel = new JLabel("Enter a pattern to see matching samplers");
         matchCountLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
         previewPanel.add(matchCountLabel, BorderLayout.SOUTH);
 
-        mainPanel.add(previewPanel, BorderLayout.CENTER);
+        panel.add(previewPanel, BorderLayout.CENTER);
 
-        add(mainPanel, BorderLayout.CENTER);
-
-        // Button panel
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
-        JButton previewButton = new JButton("Refresh Preview");
-        JButton okButton = new JButton("Apply");
-        JButton cancelButton = new JButton("Cancel");
-
-        previewButton.addActionListener(e -> updatePreview());
-
-        okButton.addActionListener(e -> {
-            if (validateInput()) {
-                confirmed = true;
-                dispose();
-            }
-        });
-
-        cancelButton.addActionListener(e -> {
-            confirmed = false;
-            dispose();
-        });
-
-        buttonPanel.add(previewButton);
-        buttonPanel.add(Box.createHorizontalStrut(20));
-        buttonPanel.add(okButton);
-        buttonPanel.add(cancelButton);
-        add(buttonPanel, BorderLayout.SOUTH);
-
-        // Set default button
-        getRootPane().setDefaultButton(okButton);
-
-        // Setup listeners for live preview
-        setupListeners();
+        return panel;
     }
 
     /**
-     * Sets up listeners for automatic preview updates.
+     * Creates the HTTP Headers tab panel.
      */
-    private void setupListeners() {
-        // Debounced update timer
-        updateTimer = new Timer(300, e -> updatePreview());
+    private JPanel createHeadersTab() {
+        JPanel panel = new JPanel(new BorderLayout(10, 10));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        // Configuration panel
+        JPanel configPanel = new JPanel(new GridBagLayout());
+        configPanel.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createEtchedBorder(), "Header Configuration",
+            TitledBorder.LEFT, TitledBorder.TOP));
+        
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(5, 5, 5, 5);
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+
+        // Header Name Pattern
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.weightx = 0;
+        configPanel.add(new JLabel("Header Name Pattern:"), gbc);
+
+        gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.gridwidth = 2;
+        headerPatternField = new JTextField(30);
+        headerPatternField.setToolTipText("Enter a pattern to match HTTP header names");
+        configPanel.add(headerPatternField, gbc);
+
+        // Pattern example label
+        gbc.gridy = 1;
+        gbc.gridx = 1;
+        headerPatternExampleLabel = new JLabel(HEADER_EXAMPLE_SIMPLE);
+        headerPatternExampleLabel.setFont(headerPatternExampleLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        headerPatternExampleLabel.setForeground(Color.GRAY);
+        configPanel.add(headerPatternExampleLabel, gbc);
+
+        // Pattern error label
+        gbc.gridy = 2;
+        gbc.gridx = 1;
+        headerPatternErrorLabel = new JLabel(" ");
+        headerPatternErrorLabel.setForeground(Color.RED);
+        headerPatternErrorLabel.setFont(headerPatternErrorLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        configPanel.add(headerPatternErrorLabel, gbc);
+
+        // Action info
+        gbc.gridy = 3;
+        gbc.gridx = 0;
+        gbc.gridwidth = 3;
+        JLabel actionInfoLabel = new JLabel("Action: Delete matching header rows from all HTTP Header Managers");
+        actionInfoLabel.setFont(actionInfoLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        actionInfoLabel.setForeground(Color.GRAY);
+        configPanel.add(actionInfoLabel, gbc);
+
+        // Options panel
+        gbc.gridy = 4;
+        gbc.gridx = 0;
+        gbc.gridwidth = 3;
+        JPanel optionsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        headerUseRegexCheckBox = new JCheckBox("Use Regular Expression");
+        headerCaseSensitiveCheckBox = new JCheckBox("Case Sensitive");
+        headerInvertMatchCheckBox = new JCheckBox("Invert Match");
+        headerInvertMatchCheckBox.setToolTipText("Delete headers that do NOT match the pattern");
+        optionsPanel.add(headerUseRegexCheckBox);
+        optionsPanel.add(headerCaseSensitiveCheckBox);
+        optionsPanel.add(headerInvertMatchCheckBox);
+        configPanel.add(optionsPanel, gbc);
+
+        panel.add(configPanel, BorderLayout.NORTH);
+
+        // Preview panel
+        JPanel previewPanel = new JPanel(new BorderLayout(5, 5));
+        previewPanel.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createEtchedBorder(), "Matching Headers Preview",
+            TitledBorder.LEFT, TitledBorder.TOP));
+
+        headerPreviewListModel = new DefaultListModel<>();
+        headerPreviewList = new JList<>(headerPreviewListModel);
+        headerPreviewList.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        headerPreviewList.setVisibleRowCount(8);
+        JScrollPane scrollPane = new JScrollPane(headerPreviewList);
+        scrollPane.setPreferredSize(new Dimension(550, 180));
+        previewPanel.add(scrollPane, BorderLayout.CENTER);
+
+        headerMatchCountLabel = new JLabel("Enter a pattern to see matching headers");
+        headerMatchCountLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        previewPanel.add(headerMatchCountLabel, BorderLayout.SOUTH);
+
+        panel.add(previewPanel, BorderLayout.CENTER);
+
+        return panel;
+    }
+
+    /**
+     * Sets up listeners for the Samplers tab.
+     */
+    private void setupSamplerListeners() {
+        updateTimer = new Timer(300, e -> updateSamplerPreview());
         updateTimer.setRepeats(false);
 
-        // Pattern field listener
         uriPatternField.getDocument().addDocumentListener(new DocumentListener() {
             @Override
-            public void insertUpdate(DocumentEvent e) { scheduleUpdate(); }
+            public void insertUpdate(DocumentEvent e) { scheduleSamplerUpdate(); }
             @Override
-            public void removeUpdate(DocumentEvent e) { scheduleUpdate(); }
+            public void removeUpdate(DocumentEvent e) { scheduleSamplerUpdate(); }
             @Override
-            public void changedUpdate(DocumentEvent e) { scheduleUpdate(); }
+            public void changedUpdate(DocumentEvent e) { scheduleSamplerUpdate(); }
         });
 
-        // Checkbox listeners
         useRegexCheckBox.addActionListener(e -> {
-            // Update example text based on regex checkbox
             patternExampleLabel.setText(useRegexCheckBox.isSelected() ? EXAMPLE_REGEX : EXAMPLE_SIMPLE);
-            updatePreview();
+            updateSamplerPreview();
         });
-        caseSensitiveCheckBox.addActionListener(e -> updatePreview());
-        invertMatchCheckBox.addActionListener(e -> updatePreview());
+        caseSensitiveCheckBox.addActionListener(e -> updateSamplerPreview());
+        invertMatchCheckBox.addActionListener(e -> updateSamplerPreview());
 
-        // Action combo listener
         actionComboBox.addActionListener(e -> {
             ActionType selected = (ActionType) actionComboBox.getSelectedItem();
             if (selected != null) {
@@ -334,9 +504,30 @@ public class BulkSamplerDialog extends JDialog {
     }
 
     /**
-     * Schedules a preview update with debouncing.
+     * Sets up listeners for the HTTP Headers tab.
      */
-    private void scheduleUpdate() {
+    private void setupHeaderListeners() {
+        headerUpdateTimer = new Timer(300, e -> updateHeaderPreview());
+        headerUpdateTimer.setRepeats(false);
+
+        headerPatternField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) { scheduleHeaderUpdate(); }
+            @Override
+            public void removeUpdate(DocumentEvent e) { scheduleHeaderUpdate(); }
+            @Override
+            public void changedUpdate(DocumentEvent e) { scheduleHeaderUpdate(); }
+        });
+
+        headerUseRegexCheckBox.addActionListener(e -> {
+            headerPatternExampleLabel.setText(headerUseRegexCheckBox.isSelected() ? HEADER_EXAMPLE_REGEX : HEADER_EXAMPLE_SIMPLE);
+            updateHeaderPreview();
+        });
+        headerCaseSensitiveCheckBox.addActionListener(e -> updateHeaderPreview());
+        headerInvertMatchCheckBox.addActionListener(e -> updateHeaderPreview());
+    }
+
+    private void scheduleSamplerUpdate() {
         if (updateTimer.isRunning()) {
             updateTimer.restart();
         } else {
@@ -344,10 +535,18 @@ public class BulkSamplerDialog extends JDialog {
         }
     }
 
+    private void scheduleHeaderUpdate() {
+        if (headerUpdateTimer.isRunning()) {
+            headerUpdateTimer.restart();
+        } else {
+            headerUpdateTimer.start();
+        }
+    }
+
     /**
-     * Updates the preview list with matching samplers.
+     * Updates the sampler preview list.
      */
-    private void updatePreview() {
+    private void updateSamplerPreview() {
         previewListModel.clear();
         patternErrorLabel.setText(" ");
 
@@ -357,7 +556,6 @@ public class BulkSamplerDialog extends JDialog {
             return;
         }
 
-        // Validate regex if needed
         if (useRegexCheckBox.isSelected()) {
             try {
                 Pattern.compile(pattern);
@@ -368,7 +566,6 @@ public class BulkSamplerDialog extends JDialog {
             }
         }
 
-        // Find matching samplers
         GuiPackage guiPackage = GuiPackage.getInstance();
         if (guiPackage == null || guiPackage.getTreeModel() == null) {
             matchCountLabel.setText("Unable to access test plan");
@@ -391,6 +588,50 @@ public class BulkSamplerDialog extends JDialog {
     }
 
     /**
+     * Updates the header preview list.
+     */
+    private void updateHeaderPreview() {
+        headerPreviewListModel.clear();
+        headerPatternErrorLabel.setText(" ");
+
+        String pattern = headerPatternField.getText().trim();
+        if (pattern.isEmpty()) {
+            headerMatchCountLabel.setText("Enter a pattern to see matching headers");
+            return;
+        }
+
+        if (headerUseRegexCheckBox.isSelected()) {
+            try {
+                Pattern.compile(pattern);
+            } catch (PatternSyntaxException e) {
+                headerPatternErrorLabel.setText("Invalid regex: " + e.getDescription());
+                headerMatchCountLabel.setText("Fix the pattern error above");
+                return;
+            }
+        }
+
+        GuiPackage guiPackage = GuiPackage.getInstance();
+        if (guiPackage == null || guiPackage.getTreeModel() == null) {
+            headerMatchCountLabel.setText("Unable to access test plan");
+            return;
+        }
+
+        List<String> matches = findMatchingHeaderNames(guiPackage, pattern, 
+            headerUseRegexCheckBox.isSelected(), headerCaseSensitiveCheckBox.isSelected(),
+            headerInvertMatchCheckBox.isSelected());
+
+        for (String match : matches) {
+            headerPreviewListModel.addElement(match);
+        }
+
+        if (matches.isEmpty()) {
+            headerMatchCountLabel.setText("No headers match the pattern");
+        } else {
+            headerMatchCountLabel.setText(String.format("Found %d matching header(s)", matches.size()));
+        }
+    }
+
+    /**
      * Finds sampler names matching the pattern.
      */
     private List<String> findMatchingSamplerNames(GuiPackage guiPackage, String uriPattern,
@@ -405,13 +646,18 @@ public class BulkSamplerDialog extends JDialog {
             pattern = Pattern.compile(uriPattern, flags);
         }
 
-        findMatchingSamplersRecursive(rootNode, uriPattern, pattern, caseSensitive, invertMatch, results);
+        // If no scope nodes, search entire test plan
+        if (scopeNodes == null || scopeNodes.isEmpty()) {
+            findMatchingSamplersRecursive(rootNode, uriPattern, pattern, caseSensitive, invertMatch, results);
+        } else {
+            // Search within each selected scope node
+            for (JMeterTreeNode scopeNode : scopeNodes) {
+                findMatchingSamplersRecursive(scopeNode, uriPattern, pattern, caseSensitive, invertMatch, results);
+            }
+        }
         return results;
     }
 
-    /**
-     * Recursively finds matching samplers.
-     */
     private void findMatchingSamplersRecursive(JMeterTreeNode node, String uriPattern,
             Pattern pattern, boolean caseSensitive, boolean invertMatch, List<String> results) {
         
@@ -421,7 +667,6 @@ public class BulkSamplerDialog extends JDialog {
             String uri = extractUri(element);
             if (uri != null) {
                 boolean matches = matchesPattern(uri, uriPattern, pattern, caseSensitive);
-                // Invert the match result if invertMatch is enabled
                 if (invertMatch) {
                     matches = !matches;
                 }
@@ -440,14 +685,70 @@ public class BulkSamplerDialog extends JDialog {
     }
 
     /**
-     * Extracts the URI from a sampler element.
-     * For HTTP samplers, builds full URL from protocol/domain/port/path.
-     * Also includes the sampler name in the searchable text.
+     * Finds header names matching the pattern.
      */
+    private List<String> findMatchingHeaderNames(GuiPackage guiPackage, String headerPattern,
+            boolean useRegex, boolean caseSensitive, boolean invertMatch) {
+        
+        List<String> results = new ArrayList<>();
+        JMeterTreeNode rootNode = (JMeterTreeNode) guiPackage.getTreeModel().getRoot();
+        
+        Pattern pattern = null;
+        if (useRegex) {
+            int flags = caseSensitive ? 0 : Pattern.CASE_INSENSITIVE;
+            pattern = Pattern.compile(headerPattern, flags);
+        }
+
+        // If no scope nodes, search entire test plan
+        if (scopeNodes == null || scopeNodes.isEmpty()) {
+            findMatchingHeadersRecursive(rootNode, headerPattern, pattern, caseSensitive, invertMatch, results);
+        } else {
+            // Search within each selected scope node
+            for (JMeterTreeNode scopeNode : scopeNodes) {
+                findMatchingHeadersRecursive(scopeNode, headerPattern, pattern, caseSensitive, invertMatch, results);
+            }
+        }
+        return results;
+    }
+
+    private void findMatchingHeadersRecursive(JMeterTreeNode node, String headerPattern,
+            Pattern pattern, boolean caseSensitive, boolean invertMatch, List<String> results) {
+        
+        TestElement element = node.getTestElement();
+        
+        if (element instanceof HeaderManager headerManager) {
+            CollectionProperty headers = headerManager.getHeaders();
+            for (int i = 0; i < headers.size(); i++) {
+                JMeterProperty prop = headers.get(i);
+                if (prop.getObjectValue() instanceof Header header) {
+                    String headerName = header.getName();
+                    boolean matches = matchesPattern(headerName, headerPattern, pattern, caseSensitive);
+                    if (invertMatch) {
+                        matches = !matches;
+                    }
+                    if (matches) {
+                        String managerName = headerManager.getName();
+                        String headerValue = header.getValue();
+                        // Truncate long values
+                        if (headerValue.length() > 50) {
+                            headerValue = headerValue.substring(0, 47) + "...";
+                        }
+                        results.add(String.format("[%s] %s: %s", managerName, headerName, headerValue));
+                    }
+                }
+            }
+        }
+
+        Enumeration<TreeNode> children = node.children();
+        while (children.hasMoreElements()) {
+            JMeterTreeNode child = (JMeterTreeNode) children.nextElement();
+            findMatchingHeadersRecursive(child, headerPattern, pattern, caseSensitive, invertMatch, results);
+        }
+    }
+
     private String extractUri(TestElement element) {
         StringBuilder searchableText = new StringBuilder();
         
-        // Always include the element name (it might contain the URL)
         String name = element.getName();
         if (name != null) {
             searchableText.append(name);
@@ -457,7 +758,6 @@ public class BulkSamplerDialog extends JDialog {
             String path = httpSampler.getPath();
             String domain = httpSampler.getDomain();
             
-            // Build full URI if we have domain info
             if (domain != null && !domain.isEmpty()) {
                 String protocol = httpSampler.getProtocol();
                 if (protocol == null || protocol.isEmpty()) {
@@ -475,13 +775,11 @@ public class BulkSamplerDialog extends JDialog {
                     }
                     uri.append(path);
                 }
-                // Append constructed URI if different from name
                 String constructedUri = uri.toString();
                 if (!constructedUri.equals(name)) {
                     searchableText.append(" ").append(constructedUri);
                 }
             } else if (path != null && !path.isEmpty() && !path.equals(name)) {
-                // Just append path if no domain but path exists
                 searchableText.append(" ").append(path);
             }
         }
@@ -489,21 +787,18 @@ public class BulkSamplerDialog extends JDialog {
         return searchableText.toString();
     }
 
-    /**
-     * Checks if a URI matches the pattern.
-     */
-    private boolean matchesPattern(String uri, String uriPattern, Pattern pattern, boolean caseSensitive) {
-        if (uri == null) {
+    private boolean matchesPattern(String text, String patternStr, Pattern pattern, boolean caseSensitive) {
+        if (text == null) {
             return false;
         }
         
         if (pattern != null) {
-            return pattern.matcher(uri).find();
+            return pattern.matcher(text).find();
         } else {
             if (caseSensitive) {
-                return uri.contains(uriPattern);
+                return text.contains(patternStr);
             } else {
-                return uri.toLowerCase().contains(uriPattern.toLowerCase());
+                return text.toLowerCase().contains(patternStr.toLowerCase());
             }
         }
     }
@@ -512,6 +807,14 @@ public class BulkSamplerDialog extends JDialog {
      * Validates the input before applying.
      */
     private boolean validateInput() {
+        if (tabbedPane.getSelectedIndex() == 0) {
+            return validateSamplerInput();
+        } else {
+            return validateHeaderInput();
+        }
+    }
+
+    private boolean validateSamplerInput() {
         String pattern = uriPatternField.getText().trim();
         
         if (pattern.isEmpty()) {
@@ -536,7 +839,6 @@ public class BulkSamplerDialog extends JDialog {
             }
         }
 
-        // Confirm destructive action
         if (actionComboBox.getSelectedItem() == ActionType.DELETE) {
             int result = JOptionPane.showConfirmDialog(this,
                 "Are you sure you want to DELETE matching samplers?\n" +
@@ -550,57 +852,90 @@ public class BulkSamplerDialog extends JDialog {
         return true;
     }
 
-    /**
-     * Returns whether the user confirmed the dialog.
-     *
-     * @return true if the user clicked Apply, false if cancelled
-     */
+    private boolean validateHeaderInput() {
+        String pattern = headerPatternField.getText().trim();
+        
+        if (pattern.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                "Please enter a header name pattern.",
+                "Validation Error",
+                JOptionPane.WARNING_MESSAGE);
+            headerPatternField.requestFocus();
+            return false;
+        }
+
+        if (headerUseRegexCheckBox.isSelected()) {
+            try {
+                Pattern.compile(pattern);
+            } catch (PatternSyntaxException e) {
+                JOptionPane.showMessageDialog(this,
+                    "Invalid regular expression: " + e.getMessage(),
+                    "Pattern Error",
+                    JOptionPane.ERROR_MESSAGE);
+                headerPatternField.requestFocus();
+                return false;
+            }
+        }
+
+        int result = JOptionPane.showConfirmDialog(this,
+            "Are you sure you want to DELETE matching header rows?\n" +
+            "This action cannot be undone.",
+            "Confirm Delete Headers",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE);
+        return result == JOptionPane.YES_OPTION;
+    }
+
+    // ==================== Public Getters ====================
+
     public boolean isConfirmed() {
         return confirmed;
     }
 
-    /**
-     * Returns the URI pattern entered by the user.
-     *
-     * @return The URI pattern string
-     */
+    public OperationMode getOperationMode() {
+        return tabbedPane.getSelectedIndex() == 0 ? OperationMode.SAMPLERS : OperationMode.HTTP_HEADERS;
+    }
+
+    // Sampler getters
     public String getUriPattern() {
         return uriPatternField.getText().trim();
     }
 
-    /**
-     * Returns the selected action type.
-     *
-     * @return The selected ActionType
-     */
     public ActionType getSelectedAction() {
         return (ActionType) actionComboBox.getSelectedItem();
     }
 
-    /**
-     * Returns whether regex matching should be used.
-     *
-     * @return true if regex should be used
-     */
     public boolean isUseRegex() {
         return useRegexCheckBox.isSelected();
     }
 
-    /**
-     * Returns whether matching should be case-sensitive.
-     *
-     * @return true if case-sensitive matching should be used
-     */
     public boolean isCaseSensitive() {
         return caseSensitiveCheckBox.isSelected();
     }
 
-    /**
-     * Returns whether matching should be inverted.
-     *
-     * @return true if action should apply to non-matching samplers
-     */
     public boolean isInvertMatch() {
         return invertMatchCheckBox.isSelected();
+    }
+
+    // Header getters
+    public String getHeaderPattern() {
+        return headerPatternField.getText().trim();
+    }
+
+    public boolean isHeaderUseRegex() {
+        return headerUseRegexCheckBox.isSelected();
+    }
+
+    public boolean isHeaderCaseSensitive() {
+        return headerCaseSensitiveCheckBox.isSelected();
+    }
+
+    public boolean isHeaderInvertMatch() {
+        return headerInvertMatchCheckBox.isSelected();
+    }
+
+    // Scope getter
+    public List<JMeterTreeNode> getScopeNodes() {
+        return scopeNodes;
     }
 }

@@ -32,15 +32,20 @@ import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.MenuElement;
 import javax.swing.tree.TreeNode;
+import javax.swing.tree.TreePath;
 
 import org.apache.jmeter.gui.GuiPackage;
 import org.apache.jmeter.gui.action.ActionRouter;
 import org.apache.jmeter.gui.action.Command;
 import org.apache.jmeter.gui.plugin.MenuCreator;
 import org.apache.jmeter.gui.tree.JMeterTreeNode;
+import org.apache.jmeter.protocol.http.control.Header;
+import org.apache.jmeter.protocol.http.control.HeaderManager;
 import org.apache.jmeter.protocol.http.sampler.HTTPSamplerBase;
 import org.apache.jmeter.samplers.Sampler;
 import org.apache.jmeter.testelement.TestElement;
+import org.apache.jmeter.testelement.property.CollectionProperty;
+import org.apache.jmeter.testelement.property.JMeterProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -110,8 +115,20 @@ public class BulkSamplerAction implements Command, MenuCreator {
             return;
         }
 
-        // Show the configuration dialog
-        BulkSamplerDialog dialog = new BulkSamplerDialog(guiPackage.getMainFrame());
+        // Get all currently selected nodes
+        List<JMeterTreeNode> selectedNodes = new ArrayList<>();
+        TreePath[] selectionPaths = guiPackage.getTreeListener().getJTree().getSelectionPaths();
+        if (selectionPaths != null) {
+            for (TreePath path : selectionPaths) {
+                Object lastComponent = path.getLastPathComponent();
+                if (lastComponent instanceof JMeterTreeNode node) {
+                    selectedNodes.add(node);
+                }
+            }
+        }
+        
+        // Show the configuration dialog with selected scope
+        BulkSamplerDialog dialog = new BulkSamplerDialog(guiPackage.getMainFrame(), selectedNodes);
         dialog.setVisible(true);
 
         if (!dialog.isConfirmed()) {
@@ -119,12 +136,24 @@ public class BulkSamplerAction implements Command, MenuCreator {
             return;
         }
 
-        // Get configuration from dialog
+        // Check which operation mode is active
+        if (dialog.getOperationMode() == BulkSamplerDialog.OperationMode.SAMPLERS) {
+            handleSamplerOperation(guiPackage, dialog);
+        } else {
+            handleHeaderOperation(guiPackage, dialog);
+        }
+    }
+
+    /**
+     * Handles sampler operations (delete, disable, enable).
+     */
+    private void handleSamplerOperation(GuiPackage guiPackage, BulkSamplerDialog dialog) {
         String uriPattern = dialog.getUriPattern();
         BulkSamplerDialog.ActionType actionType = dialog.getSelectedAction();
         boolean useRegex = dialog.isUseRegex();
         boolean caseSensitive = dialog.isCaseSensitive();
         boolean invertMatch = dialog.isInvertMatch();
+        List<JMeterTreeNode> scopeNodes = dialog.getScopeNodes();
 
         if (uriPattern == null || uriPattern.trim().isEmpty()) {
             JOptionPane.showMessageDialog(
@@ -136,21 +165,18 @@ public class BulkSamplerAction implements Command, MenuCreator {
             return;
         }
 
-        // Perform the action
         try {
-            int affectedCount = processTestPlan(guiPackage, uriPattern, actionType, useRegex, caseSensitive, invertMatch);
+            int affectedCount = processTestPlan(guiPackage, uriPattern, actionType, useRegex, caseSensitive, invertMatch, scopeNodes);
             
-            // Refresh the GUI without collapsing the tree
             guiPackage.getMainFrame().repaint();
             guiPackage.refreshCurrentGui();
 
-            // Show result message
             String actionName = actionType.getDisplayName().toLowerCase();
             JOptionPane.showMessageDialog(
                 guiPackage.getMainFrame(),
                 "Successfully %s %d sampler(s) matching pattern: %s".formatted(
                     actionName, affectedCount, uriPattern),
-                "Bulk Sampler Manager",
+                "Bulk Edit Manager",
                 JOptionPane.INFORMATION_MESSAGE
             );
 
@@ -176,6 +202,62 @@ public class BulkSamplerAction implements Command, MenuCreator {
         }
     }
 
+    /**
+     * Handles HTTP header operations (delete matching header rows).
+     */
+    private void handleHeaderOperation(GuiPackage guiPackage, BulkSamplerDialog dialog) {
+        String headerPattern = dialog.getHeaderPattern();
+        boolean useRegex = dialog.isHeaderUseRegex();
+        boolean caseSensitive = dialog.isHeaderCaseSensitive();
+        boolean invertMatch = dialog.isHeaderInvertMatch();
+        List<JMeterTreeNode> scopeNodes = dialog.getScopeNodes();
+
+        if (headerPattern == null || headerPattern.trim().isEmpty()) {
+            JOptionPane.showMessageDialog(
+                guiPackage.getMainFrame(),
+                "Please enter a header name pattern.",
+                "Invalid Input",
+                JOptionPane.WARNING_MESSAGE
+            );
+            return;
+        }
+
+        try {
+            int affectedCount = processHeaderManagers(guiPackage, headerPattern, useRegex, caseSensitive, invertMatch, scopeNodes);
+            
+            guiPackage.getMainFrame().repaint();
+            guiPackage.refreshCurrentGui();
+
+            JOptionPane.showMessageDialog(
+                guiPackage.getMainFrame(),
+                "Successfully deleted %d header row(s) matching pattern: %s".formatted(
+                    affectedCount, headerPattern),
+                "Bulk Edit Manager",
+                JOptionPane.INFORMATION_MESSAGE
+            );
+
+            log.info("Bulk header action completed: deleted {} header(s) matching '{}'", 
+                affectedCount, headerPattern);
+
+        } catch (PatternSyntaxException ex) {
+            log.error("Invalid regex pattern: {}", headerPattern, ex);
+            JOptionPane.showMessageDialog(
+                guiPackage.getMainFrame(),
+                "Invalid regular expression: " + ex.getMessage(),
+                "Pattern Error",
+                JOptionPane.ERROR_MESSAGE
+            );
+        } catch (Exception ex) {
+            log.error("Error processing headers", ex);
+            JOptionPane.showMessageDialog(
+                guiPackage.getMainFrame(),
+                "Error processing headers: " + ex.getMessage(),
+                "Error",
+                JOptionPane.ERROR_MESSAGE
+            );
+        }
+    }
+
     // ==================== MenuCreator Interface ====================
 
     /**
@@ -189,11 +271,11 @@ public class BulkSamplerAction implements Command, MenuCreator {
     public JMenuItem[] getMenuItemsAtLocation(MENU_LOCATION location) {
         log.info("getMenuItemsAtLocation called with location: {}", location);
         if (location == MENU_LOCATION.TOOLS) {
-            JMenuItem menuItem = new JMenuItem("Bulk Sampler Manager...");
+            JMenuItem menuItem = new JMenuItem("Bulk Edit Manager...");
             menuItem.setActionCommand(BULK_SAMPLER_MANAGER);
             menuItem.setMnemonic('B');
             menuItem.addActionListener(ActionRouter.getInstance());
-            log.info("Created Bulk Sampler Manager menu item for Tools menu");
+            log.info("Created Bulk Edit Manager menu item for Tools menu");
             return new JMenuItem[] { menuItem };
         }
         return new JMenuItem[0];
@@ -238,12 +320,14 @@ public class BulkSamplerAction implements Command, MenuCreator {
      * @param actionType The action to perform (delete, disable, enable)
      * @param useRegex Whether to treat the pattern as a regular expression
      * @param caseSensitive Whether matching should be case-sensitive
+     * @param invertMatch Whether to invert the match (select non-matching samplers)
+     * @param scopeNodes The nodes to start processing from (empty for entire test plan)
      * @return The number of samplers affected
      * @throws PatternSyntaxException if the regex pattern is invalid
      */
     private int processTestPlan(GuiPackage guiPackage, String uriPattern, 
             BulkSamplerDialog.ActionType actionType, boolean useRegex, boolean caseSensitive,
-            boolean invertMatch) {
+            boolean invertMatch, List<JMeterTreeNode> scopeNodes) {
         
         JMeterTreeNode rootNode = (JMeterTreeNode) guiPackage.getTreeModel().getRoot();
         List<JMeterTreeNode> matchingSamplers = new ArrayList<>();
@@ -255,8 +339,14 @@ public class BulkSamplerAction implements Command, MenuCreator {
             pattern = Pattern.compile(uriPattern, flags);
         }
 
-        // Find all matching samplers
-        findMatchingSamplers(rootNode, uriPattern, pattern, caseSensitive, invertMatch, matchingSamplers);
+        // Find all matching samplers within scope
+        if (scopeNodes == null || scopeNodes.isEmpty()) {
+            findMatchingSamplers(rootNode, uriPattern, pattern, caseSensitive, invertMatch, matchingSamplers);
+        } else {
+            for (JMeterTreeNode scopeNode : scopeNodes) {
+                findMatchingSamplers(scopeNode, uriPattern, pattern, caseSensitive, invertMatch, matchingSamplers);
+            }
+        }
 
         log.debug("Found {} samplers matching pattern '{}'", matchingSamplers.size(), uriPattern);
 
@@ -443,6 +533,87 @@ public class BulkSamplerAction implements Command, MenuCreator {
         } catch (Exception e) {
             log.error("Failed to {} sampler: {}", enabled ? "enable" : "disable", node.getName(), e);
             return false;
+        }
+    }
+
+    // ==================== HTTP Header Processing Methods ====================
+
+    /**
+     * Processes all HTTP Header Managers to delete matching header rows.
+     * 
+     * @param guiPackage The JMeter GUI package
+     * @param headerPattern The pattern to match against header names
+     * @param useRegex Whether to treat the pattern as a regular expression
+     * @param caseSensitive Whether matching should be case-sensitive
+     * @param invertMatch Whether to invert the match (delete non-matching headers)
+     * @param scopeNodes The nodes to start processing from (empty for entire test plan)
+     * @return The number of header rows deleted
+     */
+    private int processHeaderManagers(GuiPackage guiPackage, String headerPattern, 
+            boolean useRegex, boolean caseSensitive, boolean invertMatch, List<JMeterTreeNode> scopeNodes) {
+        
+        JMeterTreeNode rootNode = (JMeterTreeNode) guiPackage.getTreeModel().getRoot();
+        
+        Pattern pattern = null;
+        if (useRegex) {
+            int flags = caseSensitive ? 0 : Pattern.CASE_INSENSITIVE;
+            pattern = Pattern.compile(headerPattern, flags);
+        }
+
+        int[] deletedCount = {0};
+        
+        // Process within scope
+        if (scopeNodes == null || scopeNodes.isEmpty()) {
+            deleteMatchingHeaders(rootNode, headerPattern, pattern, caseSensitive, invertMatch, deletedCount);
+        } else {
+            for (JMeterTreeNode scopeNode : scopeNodes) {
+                deleteMatchingHeaders(scopeNode, headerPattern, pattern, caseSensitive, invertMatch, deletedCount);
+            }
+        }
+        
+        return deletedCount[0];
+    }
+
+    /**
+     * Recursively finds and deletes matching headers from Header Managers.
+     */
+    private void deleteMatchingHeaders(JMeterTreeNode node, String headerPattern, 
+            Pattern pattern, boolean caseSensitive, boolean invertMatch, int[] deletedCount) {
+        
+        TestElement element = node.getTestElement();
+        
+        if (element instanceof HeaderManager headerManager) {
+            CollectionProperty headers = headerManager.getHeaders();
+            List<Integer> indicesToRemove = new ArrayList<>();
+            
+            // Find matching headers (iterate in reverse to safely remove)
+            for (int i = headers.size() - 1; i >= 0; i--) {
+                JMeterProperty prop = headers.get(i);
+                if (prop.getObjectValue() instanceof Header header) {
+                    String headerName = header.getName();
+                    boolean matches = matchesPattern(headerName, headerPattern, pattern, caseSensitive);
+                    if (invertMatch) {
+                        matches = !matches;
+                    }
+                    if (matches) {
+                        indicesToRemove.add(i);
+                    }
+                }
+            }
+            
+            // Remove matching headers
+            for (int index : indicesToRemove) {
+                headers.remove(index);
+                deletedCount[0]++;
+                log.debug("Deleted header at index {} from {}", index, headerManager.getName());
+            }
+        }
+
+        // Recursively process children
+        Enumeration<TreeNode> children = node.children();
+        while (children.hasMoreElements()) {
+            JMeterTreeNode child = (JMeterTreeNode) children.nextElement();
+            deleteMatchingHeaders(child, headerPattern, pattern, caseSensitive, invertMatch, deletedCount);
         }
     }
 }
